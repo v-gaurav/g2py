@@ -133,14 +133,33 @@ case "$METHOD" in
     uv run python -c "
 import qrcode
 import qrcode.image.svg
+import re, io
 
 qr_data = open('store/qr-data.txt').read().strip()
 img = qrcode.make(qr_data, image_factory=qrcode.image.svg.SvgImage)
 
-import io
 buf = io.BytesIO()
 img.save(buf)
 svg = buf.getvalue().decode()
+
+# Strip xml declaration and svg: namespace prefixes so it renders inline in HTML
+svg = re.sub(r'<\?xml[^?]*\?>\s*', '', svg)
+svg = svg.replace('svg:', '').replace('xmlns:svg=', 'xmlns=')
+# Remove duplicate xmlns, add viewBox, strip mm units so coordinates are unitless
+# The original has xmlns:svg=... and xmlns=... — after prefix strip both become xmlns=
+# Keep the first, remove any subsequent xmlns attributes
+seen_xmlns = [False]
+def dedup_xmlns(m):
+    if seen_xmlns[0]:
+        return ''
+    seen_xmlns[0] = True
+    return m.group(0)
+svg = re.sub(r'xmlns=\"[^\"]*\"', dedup_xmlns, svg)
+m = re.search(r'width=\"(\d+)mm\" height=\"(\d+)mm\"', svg)
+if m:
+    w, h = m.group(1), m.group(2)
+    svg = svg.replace(f'width=\"{w}mm\" height=\"{h}mm\"', f'viewBox=\"0 0 {w} {h}\"', 1)
+svg = svg.replace('mm\"', '\"')
 
 template = open('.claude/skills/setup/scripts/qr-auth.html').read()
 with open('store/qr-auth.html', 'w') as f:

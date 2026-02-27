@@ -81,6 +81,10 @@ class WhatsAppChannel:
             db_path = str(auth_dir / "neonize.db")
             self._client = NewClient(db_path)
 
+            # Capture the asyncio loop so neonize callbacks (from Go threads)
+            # can schedule coroutines back onto it.
+            loop = asyncio.get_event_loop()
+
             # Register event handlers
             @self._client.event(ConnectedEv)
             def on_connected(_client, _event):
@@ -89,7 +93,7 @@ class WhatsAppChannel:
                 logger.info("Connected to WhatsApp")
 
                 # Flush queued messages
-                asyncio.create_task(self._flush_outgoing_queue())
+                asyncio.run_coroutine_threadsafe(self._flush_outgoing_queue(), loop)
 
                 # Initialize metadata sync
                 if not self._metadata_sync and self._chat_repo:
@@ -97,15 +101,16 @@ class WhatsAppChannel:
 
             @self._client.event(MessageEv)
             def on_message(_client, event):
-                asyncio.create_task(self._handle_message(event))
+                asyncio.run_coroutine_threadsafe(self._handle_message(event), loop)
 
             @self._client.event(PairStatusEv)
             def on_pair_status(_client, event):
                 logger.info("WhatsApp pairing status", status=str(event))
 
-            # Connect (blocking in neonize, run in thread)
+            # Connect (blocking in neonize, runs forever in background thread)
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._client.connect)
+            self._connect_future = loop.run_in_executor(None, self._client.connect)
+            self._connect_future.add_done_callback(self._on_connect_done)
 
         except ImportError:
             logger.error(
@@ -114,6 +119,14 @@ class WhatsAppChannel:
             )
             # Stub mode: mark as connected for testing
             self._connected = True
+
+    def _on_connect_done(self, future: asyncio.Future) -> None:
+        """Handle unexpected return or exception from neonize connect."""
+        try:
+            future.result()
+        except Exception:
+            logger.exception("WhatsApp connection terminated")
+        self._connected = False
 
     async def _handle_message(self, event: object) -> None:
         """Handle incoming WhatsApp message from neonize."""
